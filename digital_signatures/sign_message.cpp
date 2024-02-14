@@ -1,101 +1,149 @@
-#include <stdio.h>
-#include <string.h>
-#include <errno.h>
-#include <openssl/pem.h>
+#include <iostream>
+
+#include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/conf.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 
-#define KEYFILE "private_key.pem"
-#define N 3000
-#define BUFFSIZE 80
-
-EVP_PKEY *read_secret_key_from_file(const char * fname)
-{
-    EVP_PKEY *key = NULL;
-    FILE *fp = fopen(fname, "r");
-    if(!fp) {
-        perror(fname); return NULL;
+bool encrypt(const unsigned char *plaintext, int plaintext_len, const unsigned char *key, const unsigned char *iv, unsigned char *ciphertext, int &ciphertext_len) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        std::cerr << "Failed to create EVP_CIPHER_CTX" << std::endl;
+        return false;
     }
-    key = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
-    fclose(fp);
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, key, iv) != 1) {
+        std::cerr << "Failed to initialize encryption" << std::endl;
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+
+    if (EVP_EncryptUpdate(ctx, ciphertext, &ciphertext_len, plaintext, plaintext_len) != 1) {
+        std::cerr << "Failed to encrypt data" << std::endl;
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+    return true;
+}
+
+bool decrypt(const unsigned char *ciphertext, int ciphertext_len, const unsigned char *key, const unsigned char *iv, unsigned char *plaintext, int &plaintext_len) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        std::cerr << "Failed to create EVP_CIPHER_CTX" << std::endl;
+        return false;
+    }
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, key, iv) != 1) {
+        std::cerr << "Failed to initialize decryption" << std::endl;
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+
+    if (EVP_DecryptUpdate(ctx, plaintext, &plaintext_len, ciphertext, ciphertext_len) != 1) {
+        std::cerr << "Failed to decrypt data" << std::endl;
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+    return true;
+}
+
+
+EVP_PKEY *generate_key_pair() {
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+    if (!ctx) {
+        std::cerr << "Failed to create EVP_PKEY_CTX" << std::endl;
+        return nullptr;
+    }
+
+    if (EVP_PKEY_keygen_init(ctx) <= 0) {
+        std::cerr << "Failed to initialize keygen" << std::endl;
+        EVP_PKEY_CTX_free(ctx);
+        return nullptr;
+    }
+
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0) {
+        std::cerr << "Failed to set key length" << std::endl;
+        EVP_PKEY_CTX_free(ctx);
+        return nullptr;
+    }
+
+    EVP_PKEY *key = nullptr;
+    if (EVP_PKEY_keygen(ctx, &key) <= 0) {
+        std::cerr << "Failed to generate key pair" << std::endl;
+        EVP_PKEY_CTX_free(ctx);
+        return nullptr;
+    }
+
+    EVP_PKEY_CTX_free(ctx);
     return key;
 }
 
-int do_sign(EVP_PKEY *key, const unsigned char *msg, const size_t mlen,
-            void **sig, size_t *slen)
-{
-    EVP_MD_CTX *mdctx = NULL;
-    int ret = 0;
-
-    /* Create the Message Digest Context */
-    if(!(mdctx = EVP_MD_CTX_create())) goto err;
-
-    /* Initialise the DigestSign operation - SHA-256 has been selected
-     * as the message digest function in this example */
-    if(1 != EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, key))
-        goto err;
-
-    /* Call update with the message */
-    if(1 != EVP_DigestSignUpdate(mdctx, msg, mlen)) goto err;
-
-    /* Finalise the DigestSign operation */
-    /* First call EVP_DigestSignFinal with a NULL sig parameter to
-     * obtain the length of the signature. Length is returned in slen */
-    if(1 != EVP_DigestSignFinal(mdctx, NULL, slen)) goto err;
-    /* Allocate memory for the signature based on size in slen */
-    if(!(*sig = OPENSSL_malloc(*slen))) goto err;
-    /* Obtain the signature */
-    if(1 != EVP_DigestSignFinal(mdctx, (unsigned char*) *sig, slen)) goto err;
-
-    /* Success */
-    ret = 1;
-
-err:
-    if(ret != 1)
-    {
-        /* Do some error handling */
+bool sign(EVP_PKEY *private_key, const unsigned char *message, int message_len, unsigned char *signature, size_t &signature_len) {
+    EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+    if (!ctx) {
+        std::cerr << "Failed to create EVP_MD_CTX" << std::endl;
+        return false;
     }
 
-    /* Clean up */
-    if(*sig && !ret) OPENSSL_free(*sig);
-    if(mdctx) EVP_MD_CTX_destroy(mdctx);
+    if (EVP_DigestSignInit(ctx, nullptr, EVP_sha256(), nullptr, private_key) != 1) {
+        std::cerr << "Failed to initialize signing" << std::endl;
+        EVP_MD_CTX_destroy(ctx);
+        return false;
+    }
 
-    return ret;
+    if (EVP_DigestSignUpdate(ctx, message, message_len) != 1) {
+        std::cerr << "Failed to update signing" << std::endl;
+        EVP_MD_CTX_destroy(ctx);
+        return false;
+    }
+
+    if (EVP_DigestSignFinal(ctx, signature, &signature_len) != 1) {
+        std::cerr << "Failed to finalize signing" << std::endl;
+        EVP_MD_CTX_destroy(ctx);
+        return false;
+    }
+
+    EVP_MD_CTX_destroy(ctx);
+    return true;
 }
 
-int main()
-{
-    int ret = EXIT_FAILURE;
-    const char *str = "I am watching you!I am watching you!";
-    void *sig = NULL;
-    size_t slen = 0;
-    unsigned char msg[BUFFSIZE];
-    size_t mlen = 0;
-
-    EVP_PKEY *key = read_secret_key_from_file(KEYFILE);
-    if(!key) goto err;
-
-    for(int i=0;i<N;i++) {
-        if ( snprintf((char *)msg, BUFFSIZE, "%s %d", str, i+1) < 0 )
-            goto err;
-        mlen = strlen((const char*)msg);
-        if (!do_sign(key, msg, mlen, &sig, &slen)) goto err;
-        OPENSSL_free(sig); sig = NULL;
-        printf("\"%s\" -> siglen=%lu\n", msg, slen);
+bool verify(EVP_PKEY *public_key, const unsigned char *message, int message_len, const unsigned char *signature, unsigned int signature_len) {
+    EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+    if (!ctx) {
+        std::cerr << "Failed to create EVP_MD_CTX" << std::endl;
+        return false;
     }
 
-    printf("DONE\n");
-    ret = EXIT_SUCCESS;
-
-err:
-    if (ret != EXIT_SUCCESS) {
-        ERR_print_errors_fp(stderr);
-        fprintf(stderr, "Something broke!\n");
+    if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, public_key) != 1) {
+        std::cerr << "Failed to initialize verification" << std::endl;
+        EVP_MD_CTX_destroy(ctx);
+        return false;
     }
 
-    if (key)
-        EVP_PKEY_free(key);
+    if (EVP_DigestVerifyUpdate(ctx, message, message_len) != 1) {
+        std::cerr << "Failed to update verification" << std::endl;
+        EVP_MD_CTX_destroy(ctx);
+        return false;
+    }
 
-    exit(ret);
+    int result = EVP_DigestVerifyFinal(ctx, signature, signature_len);
+    EVP_MD_CTX_destroy(ctx);
+
+    if (result != 1) {
+        std::cerr << "Failed to finalize verification" << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
+int
+main(int argc, char** argv)
+{
+    return EXIT_SUCCESS;
+}
